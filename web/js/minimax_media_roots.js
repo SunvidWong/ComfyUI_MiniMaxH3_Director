@@ -21,6 +21,8 @@ const rootsState = {
     promise: null,
     roots: [],
     defaultId: DEFAULT_MEDIA_ROOT,
+    missing: [],
+    config: null,
 };
 
 /** Normalise anything (string or entry object) to a media root id. */
@@ -100,6 +102,8 @@ export function loadMediaRoots(force = false) {
             const roots = Array.isArray(data?.roots) ? data.roots : [];
             rootsState.roots = roots;
             rootsState.defaultId = String(data?.default || DEFAULT_MEDIA_ROOT);
+            rootsState.missing = Array.isArray(data?.missing) ? data.missing : [];
+            rootsState.config = data?.config || null;
             return roots;
         })
         .catch(() => {
@@ -111,4 +115,13 @@ export function loadMediaRoots(force = false) {
 
 export function listMediaRootsSync() {
     return rootsState.roots;
+}
+
+/** Root list plus any configuration problem worth telling the user about. */
+export function mediaRootsStatus() {
+    return {
+        roots: rootsState.roots,
+        missing: rootsState.missing,
+        config: rootsState.config,
+    };
 }

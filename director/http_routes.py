@@ -17,10 +17,12 @@ from server import PromptServer
 
 from ..lib.media_roots import (
     INPUT_ID as INPUT_ROOT_ID,
+    config_status,
     default_root_id,
     get_media_root,
     is_within,
     list_media_roots,
+    missing_roots,
     normalize_root_id,
     roots_for_json,
 )
@@ -524,6 +526,8 @@ async def minimax_media_roots(request):
             "default": default_root_id(),
             "roots": roots_for_json(),
             "inputDir": input_root.path if input_root else "",
+            "missing": missing_roots(),
+            "config": config_status(),
         }
     except Exception as exc:
         log.warning("MiniMax H3 Director media roots failed: %s", exc)

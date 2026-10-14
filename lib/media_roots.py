@@ -113,6 +113,7 @@ class _ConfigCache:
     extra: list[dict[str, Any]] = field(default_factory=list)
     exclude: list[str] = field(default_factory=list)
     stamp: tuple = ()
+    error: str = ""
 
 
 _LOCK = threading.RLock()
@@ -173,11 +174,15 @@ def _read_config() -> tuple[list[dict[str, Any]], list[str]]:
 
     extra: list[dict[str, Any]] = []
     exclude: list[str] = []
+    error = ""
     if stamp is not None:
         try:
-            with open(path, "r", encoding="utf-8") as handle:
+            # utf-8-sig: Notepad / PowerShell Set-Content / VS Code all happily
+            # write a BOM, which plain utf-8 json.load() rejects.
+            with open(path, "r", encoding="utf-8-sig") as handle:
                 extra, exclude = _parse_config(json.load(handle))
         except Exception as exc:  # noqa: BLE001 - a broken config must not kill ComfyUI
+            error = f"{type(exc).__name__}: {exc}"
             log.warning("MiniMax H3 Director: cannot read %s: %s", path, exc)
             extra, exclude = [], []
     env_raw = os.environ.get(ENV_VAR, "").strip()
@@ -188,6 +193,7 @@ def _read_config() -> tuple[list[dict[str, Any]], list[str]]:
             extra.extend(item for item in env_extra if item["id"] not in known)
             exclude = list(dict.fromkeys([*exclude, *env_exclude]))
         except Exception as exc:  # noqa: BLE001
+            error = error or f"{ENV_VAR}: {type(exc).__name__}: {exc}"
             log.warning("MiniMax H3 Director: bad %s JSON: %s", ENV_VAR, exc)
 
     with _LOCK:
@@ -196,6 +202,7 @@ def _read_config() -> tuple[list[dict[str, Any]], list[str]]:
             extra=extra,
             exclude=exclude,
             stamp=stamp if stamp is not None else (),
+            error=error,
         )
         return _CACHE.extra, _CACHE.exclude
 
@@ -290,6 +297,36 @@ def default_root_id(preferred: Any = None) -> str:
 
 def roots_for_json() -> list[dict[str, Any]]:
     return [root.to_json() for root in list_media_roots()]
+
+
+def missing_roots() -> list[dict[str, str]]:
+    """Configured roots whose directory does not exist (surfaced to the UI)."""
+    extra, _exclude = _read_config()
+    present = {root.id for root in list_media_roots()}
+    return [
+        {
+            "id": item["id"],
+            "label": item["label"],
+            "path": item["path"],
+            "reason": "missing-directory",
+        }
+        for item in extra
+        if item["id"] not in present
+    ]
+
+
+def config_status() -> dict[str, Any]:
+    """State of media_roots.json, for the picker to report configuration problems."""
+    extra, _exclude = _read_config()
+    path = config_path()
+    with _LOCK:
+        error = _CACHE.error
+    return {
+        "path": path,
+        "exists": os.path.isfile(path),
+        "error": error,
+        "configured": len(extra),
+    }
 
 
 # --------------------------------------------------------------------------- #

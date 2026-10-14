@@ -127,6 +127,7 @@ import {
     loadMediaRoots,
     mediaKey,
     mediaRelPath,
+    mediaRootsStatus,
     mediaViewUrl,
     parseMediaKey,
 } from "./minimax_media_roots.js";
@@ -1579,6 +1580,21 @@ function mediaRootLabel(root) {
     if (root.id === "input") return t("mediaPicker.rootInput");
     if (root.id === "output") return t("mediaPicker.rootOutput");
     return root.label || root.id;
+}
+
+/** Human-readable media_roots.json problem, or "" when the config is fine. */
+function mediaRootsProblem() {
+    const status = mediaRootsStatus();
+    const missing = status?.missing || [];
+    if (missing.length) {
+        return t("mediaPicker.rootsMissing", {
+            list: missing.map((item) => item.id).join(", "),
+        });
+    }
+    if (status?.config?.error) {
+        return t("mediaPicker.rootsConfigError", { path: status.config.path || "" });
+    }
+    return "";
 }
 
 function readMediaPickerView() {
@@ -8857,6 +8873,10 @@ class MiniMaxH3DirectorEditor {
                 }
                 buildRootBar(roots);
                 await loadItems();
+                const problem = mediaRootsProblem();
+                if (problem) {
+                    statusEl.textContent = `${statusEl.textContent} · ${problem}`;
+                }
             })();
             if (view === "thumbs") galleryEl.focus();
             else tableEl.focus();
