@@ -72,6 +72,39 @@ timeline.json
 - Slot numbers match the UI: if Shared params occupy Picture 1–3, group folders continue from `Picture4` — do not rename the group’s first image to `Picture1`.
 - Models (UNET / CLIP / VAE) are not included. Import replaces the current node timeline (with confirmation). Media is copied to ComfyUI `input/minimax_director_packs/`.
 
+## Media sources: input / output / custom folders
+
+Reference images, videos and audio — plus fl2v start/end frames, the v2v source video and batch-panel material — can be picked straight from directories that already exist on the server, not only uploaded from your machine.
+
+| Picker group | Directory |
+|---|---|
+| All (default) | every root below, newest first |
+| Input | `ComfyUI/input` — where uploads land |
+| Output | `ComfyUI/output` — **everything you already generated** |
+| Custom | any directory listed in `media_roots.json` |
+
+- The picker has a group switch and a filename search (large roots return the newest 400 entries; search narrows it). Entries outside `input` are prefixed with an `[Output]`-style tag so identically named files stay distinguishable.
+- Picking from output/a custom root does **not** copy the file into `input/`; it is read from its original path. ComfyUI's `/view` only serves input/output/temp, so custom roots are served by the plugin's own `/minimax/director/media_file` (root id + relative path only; `..` and absolute paths are rejected).
+- The segment cache (`minimax_seg_cache`) is never listed.
+
+**Extra folders**: copy `media_roots.example.json` to `media_roots.json` (plugin root) and edit. The file is re-read on change — **no ComfyUI restart needed**. Missing directories and JSON parse errors are reported in the picker status line instead of failing silently.
+
+```json
+{
+  "roots": [
+    {"id": "assets", "label": "Assets", "path": "S:\\Assets"},
+    {"id": "refs",   "label": "References", "path": "S:\\refs", "exclude": ["tmp"]}
+  ],
+  "exclude": ["minimax_seg_cache"]
+}
+```
+
+- `id` accepts letters/digits/`_`/`-`/`.` only; clients pass ids, never paths.
+- The same JSON can be supplied through the `MINIMAX_DIRECTOR_MEDIA_ROOTS` environment variable.
+- Exporting a director pack that references a custom root copies those files into the pack (they land in `input/` on import).
+
+> **Existing workflows keep working**: entries without `type` still look in `input/` first, then fall back to `output/` and the configured roots.
+
 ## Requirements
 
 **ComfyUI ≥ v0.30.0** with official MiniMax H3 nodes ([PR #15224](https://github.com/comfyanonymous/ComfyUI/pull/15224), [PR #15228](https://github.com/comfyanonymous/ComfyUI/pull/15228)).

@@ -76,6 +76,39 @@ timeline.json
 - 槽位编号与界面相同：公共参数占用 Picture 1–3 时，组文件夹里从 `Picture4` 续编，不要在组内把第一张改名为 `Picture1`。
 - 不含 UNET / CLIP / VAE。导入会覆盖当前节点时间轴（有确认）。媒体落到 ComfyUI `input/minimax_director_packs/`。
 
+## 素材来源：输入 / 输出 / 自定义目录
+
+参考图、参考视频、参考音频（以及 fl2v 首尾帧、v2v 源视频、批量面板素材）除了上传本地文件，现在可以直接从服务器上已有的目录里选：
+
+| 选择器分组 | 对应目录 |
+|---|---|
+| 全部（默认） | 下面所有目录，按文件修改时间倒序 |
+| 输入目录 | `ComfyUI/input`——上传的素材落在这里 |
+| 输出目录 | `ComfyUI/output`——**已经生成出来的画面/视频** |
+| 自定义 | `media_roots.json` 里配置的任意目录 |
+
+- 选择器顶部可切换分组、按文件名搜索（大目录默认只返回最近 400 个，搜索可缩小范围）；列表里非 input 的条目会带 `[输出目录]` 之类前缀，避免与同名文件混淆。
+- 选中 output/自定义目录的素材不会复制到 input/，采样时按原路径读取。ComfyUI 的 `/view` 只能服务 input/output/temp，自定义目录因此走插件自己的 `/minimax/director/media_file`（只接受根目录 id + 相对路径，`..` 与绝对路径会被拒绝）。
+- 分段缓存目录（`minimax_seg_cache`）不会出现在列表里。
+
+**配置自定义目录**：把 `media_roots.example.json` 复制成 `media_roots.json`（放在插件根目录）后按需修改。文件改动后**不需要重启 ComfyUI**（按 mtime 热加载）；配置了但不存在的目录、或 JSON 解析失败，会在选择器状态栏明确提示，不再静默失效。
+
+```json
+{
+  "roots": [
+    {"id": "assets", "label": "素材盘", "path": "S:\\Assets"},
+    {"id": "refs",   "label": "参考图库", "path": "S:\\refs", "exclude": ["tmp"]}
+  ],
+  "exclude": ["minimax_seg_cache"]
+}
+```
+
+- `id` 只用字母/数字/`_`/`-`/`.`；前后端之间只传 id，不接受任意路径。
+- 也可以用环境变量 `MINIMAX_DIRECTOR_MEDIA_ROOTS` 传同样的 JSON（容器/多实例场景）。
+- 引用自定义目录素材时，导出导演包会把文件一起打包（导入后落在 `input/`）。
+
+> **旧工作流不受影响**：没有 `type` 的历史素材仍然优先在 input/ 里查找，找不到再回退 output/ 与自定义目录。
+
 ## 依赖
 
 请将 **ComfyUI** 升级到 **v0.30.0** 及以上（含官方 MiniMax H3 节点：[PR #15224](https://github.com/comfyanonymous/ComfyUI/pull/15224)、[PR #15228](https://github.com/comfyanonymous/ComfyUI/pull/15228)）。
