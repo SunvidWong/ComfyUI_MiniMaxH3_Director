@@ -578,16 +578,18 @@ def extract_input_video_frames_b64(
     *,
     subfolder: str = "",
     num_frames: int = 3,
+    type_name: str = "input",
 ) -> tuple[list[str], str | None]:
-    """Extract uniformly sampled JPEG base64 frames from a file in ComfyUI input/."""
+    """Extract uniformly sampled JPEG base64 frames from a media-root file."""
     if not filename:
         return [], "No filename"
-    input_dir = folder_paths.get_input_directory()
-    safe = os.path.normpath(str(filename)).replace("\\", "/")
-    if safe.startswith("..") or os.path.isabs(safe):
-        return [], "Invalid filename"
-    video_path = os.path.join(input_dir, subfolder, safe) if subfolder else os.path.join(input_dir, safe)
-    if not os.path.isfile(video_path):
+    from ..lib.media_roots import resolve_media_path
+
+    video_path = resolve_media_path(
+        {"videoFile": filename, "subfolder": subfolder, "type": type_name},
+        keys=("videoFile", "fileName"),
+    )
+    if not video_path or not os.path.isfile(video_path):
         return [], f"File not found: {filename}"
 
     num_frames = max(1, min(int(num_frames), 5))
@@ -650,15 +652,21 @@ def extract_input_video_frames_b64(
         return [], f"{type(exc).__name__}: {exc}"
 
 
-def load_input_image_b64(filename: str) -> tuple[str | None, str | None]:
+def load_input_image_b64(
+    filename: str,
+    *,
+    subfolder: str = "",
+    type_name: str = "input",
+) -> tuple[str | None, str | None]:
     if not filename:
         return None, "No filename"
-    input_dir = folder_paths.get_input_directory()
-    safe = os.path.normpath(str(filename)).replace("\\", "/")
-    if safe.startswith("..") or os.path.isabs(safe):
-        return None, "Invalid filename"
-    path = os.path.join(input_dir, safe)
-    if not os.path.isfile(path):
+    from ..lib.media_roots import resolve_media_path
+
+    path = resolve_media_path(
+        {"imageFile": filename, "subfolder": subfolder, "type": type_name},
+        keys=("imageFile", "fileName"),
+    )
+    if not path or not os.path.isfile(path):
         return None, f"File not found: {filename}"
     try:
         img = Image.open(path).convert("RGB")

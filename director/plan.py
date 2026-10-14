@@ -23,6 +23,7 @@ from ..lib.ref_audios import MAX_REFERENCE_AUDIOS, ref_audios_dict
 from ..lib.ref_images import MAX_REFERENCE_IMAGES, REF_IMAGE_KEY_PREFIX
 from ..lib.ref_videos import MAX_REFERENCE_VIDEOS, ref_videos_dict
 from ..lib.image_prep import assert_minimax_canvas, resolve_output_dimensions
+from ..lib.media_roots import resolve_media_path as resolve_media_entry
 from ..lib.task_prompts import get_task_prompt_spec, resolve_task_key
 from .segment_loras import normalize_lora_rows
 from ..lib.video_io import (
@@ -365,10 +366,10 @@ def _decode_image_b64(b64_str: str) -> torch.Tensor:
 
 
 def load_reference_tensor(ref: dict) -> torch.Tensor | None:
-    if ref.get("imageFile"):
-        rel = str(ref["imageFile"]).replace("\\", "/")
-        file_path = os.path.join(folder_paths.get_input_directory(), rel.replace("/", os.sep))
-        if os.path.exists(file_path):
+    if ref.get("imageFile") or ref.get("fileName"):
+        # Root-aware: honours type/root (input / output / configured roots).
+        file_path = resolve_media_entry(ref, keys=("imageFile", "fileName"))
+        if file_path and os.path.exists(file_path):
             key = _ref_image_cache_key(file_path)
             cached = _ref_image_cache_get(key) if key else None
             if cached is not None:
@@ -422,7 +423,7 @@ def _load_refs(ref_list: list[dict]) -> list[SegmentRef]:
 
 
 def _reference_audio_file(item: dict) -> tuple[str, str]:
-    """Return (timeline identity rel, absolute input path) for a refAudios entry."""
+    """Return (timeline identity rel, absolute path) for a refAudios entry."""
     rel = str(
         item.get("audioFile")
         or item.get("audio_file")
@@ -432,12 +433,11 @@ def _reference_audio_file(item: dict) -> tuple[str, str]:
     ).replace("\\", "/").strip()
     if not rel:
         return "", ""
-    sub = str(item.get("subfolder") or "").replace("\\", "/").strip().strip("/")
-    located = rel
-    if sub and not located.startswith(sub + "/"):
-        located = f"{sub}/{located}"
-    file_path = os.path.join(folder_paths.get_input_directory(), located.replace("/", os.sep))
-    return rel, file_path
+    # Root-aware: honours type/root (input / output / configured roots).
+    file_path = resolve_media_entry(
+        item, keys=("audioFile", "audio_file", "fileName", "file_name")
+    )
+    return rel, (file_path or "")
 
 
 def load_reference_audio_item(item: dict) -> dict | None:

@@ -96,13 +96,18 @@ function clamp(n, lo, hi) {
     return Math.max(lo, Math.min(hi, n));
 }
 
-export function fl2vViewUrl(imageFile) {
+export function fl2vViewUrl(imageFile, type = "input") {
     if (!imageFile) return "";
+    const rootId = String(type || "input");
     const norm = String(imageFile).replace(/\\/g, "/");
+    if (rootId !== "input" && rootId !== "output" && rootId !== "temp") {
+        const params = new URLSearchParams({ id: rootId, rel: norm });
+        return api.apiURL(`/minimax/director/media_file?${params.toString()}`);
+    }
     const slash = norm.lastIndexOf("/");
     const filename = slash >= 0 ? norm.slice(slash + 1) : norm;
     const subfolder = slash >= 0 ? norm.slice(0, slash) : "";
-    const params = new URLSearchParams({ filename, type: "input" });
+    const params = new URLSearchParams({ filename, type: rootId });
     if (subfolder) params.set("subfolder", subfolder);
     return api.apiURL(`/view?${params.toString()}`);
 }
@@ -142,7 +147,7 @@ export function normalizeImageRef(raw) {
     if (!raw) return null;
     if (typeof raw === "string") {
         const imageFile = raw.trim();
-        return imageFile ? { imageFile, width: 0, height: 0 } : null;
+        return imageFile ? { imageFile, width: 0, height: 0, type: "input", subfolder: "" } : null;
     }
     const imageFile = String(raw.imageFile || raw.image_file || "").trim();
     if (!imageFile) return null;
@@ -150,13 +155,22 @@ export function normalizeImageRef(raw) {
         imageFile,
         width: parseInt(raw.width, 10) || 0,
         height: parseInt(raw.height, 10) || 0,
+        // Keep the media root: start/end frames may come from output/ or a
+        // configured directory, and losing it here breaks thumbnails + loading.
+        type: raw.type || raw.root || "input",
+        subfolder: raw.subfolder || "",
+        ...(raw.fileName ? { fileName: raw.fileName } : {}),
     };
 }
 
 /** Reusable start/end frame slots (standalone fl2v cards + mixed batch). */
 export function createFl2vSlotPair({ startImage = null, endImage = null } = {}) {
-    const startUrl = startImage?.imageFile ? fl2vViewUrl(startImage.imageFile) : "";
-    const endUrl = endImage?.imageFile ? fl2vViewUrl(endImage.imageFile) : "";
+    const startUrl = startImage?.imageFile
+        ? fl2vViewUrl(startImage.imageFile, startImage.type || "input")
+        : "";
+    const endUrl = endImage?.imageFile
+        ? fl2vViewUrl(endImage.imageFile, endImage.type || "input")
+        : "";
     const slots = document.createElement("div");
     slots.className = "bd-fl2v-slots";
     slots.innerHTML = `
@@ -1023,6 +1037,8 @@ function cloneFl2vImageRef(ref) {
         imageFile: ref.imageFile,
         width: ref.width || 0,
         height: ref.height || 0,
+        type: ref.type || "input",
+        subfolder: ref.subfolder || "",
     };
 }
 
@@ -1059,6 +1075,8 @@ async function pickFl2vSlotImage(editor, shotIndex, slotKind) {
         imageFile: picked.imageFile,
         width: picked.width || 0,
         height: picked.height || 0,
+        type: picked.type || "input",
+        subfolder: picked.subfolder || "",
     });
     syncFl2vFromShots(editor);
     editor.selectedIndex = Math.min(shotIndex, Math.max(0, (editor.timeline?.shots?.length || 1) - 1));
@@ -1177,7 +1195,13 @@ function bindFl2vSlotDnD(editor, slotEl, shotIndex, slotKind) {
                     const name = up.name || up.filename;
                     const sub = (up.subfolder || "").replace(/\\/g, "/").replace(/\/$/, "");
                     const path = sub ? `${sub}/${name}` : name;
-                    const ref = { imageFile: path, width: dims.width || 0, height: dims.height || 0 };
+                    const ref = {
+                        imageFile: path,
+                        width: dims.width || 0,
+                        height: dims.height || 0,
+                        type: up.type || "input",
+                        subfolder: sub,
+                    };
                     const shot = editor.timeline.shots?.[shotIndex];
                     if (!shot) return;
                     setFl2vSlotImage(shot, slotKind, ref);
@@ -1444,7 +1468,13 @@ export function bindFl2vEvents(editor) {
             const name = up.name || up.filename;
             const sub = (up.subfolder || "").replace(/\\/g, "/").replace(/\/$/, "");
             const path = sub ? `${sub}/${name}` : name;
-            const ref = { imageFile: path, width: dims.width || 0, height: dims.height || 0 };
+            const ref = {
+                imageFile: path,
+                width: dims.width || 0,
+                height: dims.height || 0,
+                type: up.type || "input",
+                subfolder: sub,
+            };
             let shots = editor.timeline.shots || [];
             if (mode === "slot") {
                 let shot = shots[shotIndex];
@@ -1488,7 +1518,9 @@ export function drawFl2vSegmentThumbnails(editor, ctx, seg, startX, pxWidth, y0,
 
     // Start and end are independent — never treat end as a fake start thumb.
     const startFile = seg.genImage?.imageFile || seg.imageFile || "";
+    const startType = seg.genImage?.type || "input";
     const endFile = seg.endImage?.imageFile || "";
+    const endType = seg.endImage?.type || "input";
     if (!startFile && !endFile) {
         ctx.fillStyle = "#666";
         ctx.font = "12px sans-serif";
@@ -1518,8 +1550,8 @@ export function drawFl2vSegmentThumbnails(editor, ctx, seg, startX, pxWidth, y0,
         }
     };
 
-    const ensureThumb = (file) => {
-        const key = `fl2v:${file}`;
+    const ensureThumb = (file, type = "input") => {
+        const key = `fl2v:${type}:${file}`;
         let cached = editor._thumbCache.get(key);
         if (cached?.naturalWidth) return cached;
         if (!editor._thumbPending.has(key)) {
@@ -1532,13 +1564,13 @@ export function drawFl2vSegmentThumbnails(editor, ctx, seg, startX, pxWidth, y0,
                 editor.scheduleRender();
             };
             el.onerror = () => editor._thumbPending.delete(key);
-            el.src = fl2vViewUrl(file);
+            el.src = fl2vViewUrl(file, type);
         }
         return null;
     };
 
-    const startImg = startFile ? ensureThumb(startFile) : null;
-    const endImg = endFile ? ensureThumb(endFile) : null;
+    const startImg = startFile ? ensureThumb(startFile, startType) : null;
+    const endImg = endFile ? ensureThumb(endFile, endType) : null;
     if ((startFile && !startImg) || (endFile && !endImg && !startFile)) {
         ctx.restore();
         return;
@@ -1652,6 +1684,8 @@ export function buildFl2vPayloadFields(editor) {
                 imageFile: s.genImage?.imageFile || s.imageFile || "",
                 width: s.genImage?.width || 0,
                 height: s.genImage?.height || 0,
+                type: s.genImage?.type || "input",
+                subfolder: s.genImage?.subfolder || "",
             },
             endImage: s.endImage || null,
             taskType: "",

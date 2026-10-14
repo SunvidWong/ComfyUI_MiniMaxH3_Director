@@ -123,6 +123,14 @@ import {
 } from "./minimax_i18n.js";
 import { bindPackActions } from "./minimax_pack.js";
 import {
+    DEFAULT_MEDIA_ROOT,
+    loadMediaRoots,
+    mediaKey,
+    mediaRelPath,
+    mediaViewUrl,
+    parseMediaKey,
+} from "./minimax_media_roots.js";
+import {
     attachExternalGroupsWitness,
     injectExternalGroupsWitness,
     setExternalGroupSpecsProvider,
@@ -334,12 +342,19 @@ function sanitizeSegmentForPayload(seg) {
         refAudios: Array.isArray(rest.refAudios) ? rest.refAudios.map(sanitizeRefAudio) : [],
         refVideos: Array.isArray(rest.refVideos) ? rest.refVideos.map(sanitizeRefVideo) : [],
         genImage: rest.genImage
-            ? { imageFile: rest.genImage.imageFile || "", fileName: rest.genImage.fileName || "" }
+            ? {
+                imageFile: rest.genImage.imageFile || "",
+                fileName: rest.genImage.fileName || "",
+                type: rest.genImage.type || "input",
+                subfolder: rest.genImage.subfolder || "",
+            }
             : undefined,
         startImage: rest.startImage
             ? {
                 imageFile: rest.startImage.imageFile || "",
                 fileName: rest.startImage.fileName || "",
+                type: rest.startImage.type || "input",
+                subfolder: rest.startImage.subfolder || "",
                 width: rest.startImage.width || 0,
                 height: rest.startImage.height || 0,
             }
@@ -348,6 +363,8 @@ function sanitizeSegmentForPayload(seg) {
             ? {
                 imageFile: rest.endImage.imageFile || "",
                 fileName: rest.endImage.fileName || "",
+                type: rest.endImage.type || "input",
+                subfolder: rest.endImage.subfolder || "",
                 width: rest.endImage.width || 0,
                 height: rest.endImage.height || 0,
             }
@@ -1532,17 +1549,37 @@ function videoRelativePath(upload) {
     return sub ? `${sub}/${name}` : name;
 }
 
-function inputViewUrl(relativePath, type = "input") {
-    const norm = String(relativePath || "").replace(/\\/g, "/");
-    const slash = norm.lastIndexOf("/");
-    const filename = slash >= 0 ? norm.slice(slash + 1) : norm;
-    const subfolder = slash >= 0 ? norm.slice(0, slash) : "";
-    const params = new URLSearchParams({ filename, type });
-    if (subfolder) params.set("subfolder", subfolder);
-    return api.apiURL(`/view?${params.toString()}`);
+function inputViewUrl(relativePath, type = DEFAULT_MEDIA_ROOT) {
+    return mediaViewUrl({ relPath: mediaRelPath(relativePath), type: type || DEFAULT_MEDIA_ROOT });
 }
 
 const MEDIA_PICKER_VIEW_KEY = "minimax.director.mediaPickerView";
+const MEDIA_PICKER_ROOT_KEY = "minimax.director.mediaPickerRoot";
+
+function readMediaPickerRoot() {
+    try {
+        return String(localStorage.getItem(MEDIA_PICKER_ROOT_KEY) || "");
+    } catch {
+        return "";
+    }
+}
+
+function writeMediaPickerRoot(root) {
+    try {
+        if (root) localStorage.setItem(MEDIA_PICKER_ROOT_KEY, root);
+        else localStorage.removeItem(MEDIA_PICKER_ROOT_KEY);
+    } catch {
+        /* private mode / quota */
+    }
+}
+
+/** Picker tab label: built-in roots are localised, custom roots keep their config label. */
+function mediaRootLabel(root) {
+    if (!root) return "";
+    if (root.id === "input") return t("mediaPicker.rootInput");
+    if (root.id === "output") return t("mediaPicker.rootOutput");
+    return root.label || root.id;
+}
 
 function readMediaPickerView() {
     try {
@@ -1560,8 +1597,14 @@ function writeMediaPickerView(view) {
     }
 }
 
-function refViewUrl(imageFile) {
-    return inputViewUrl(imageFile, "input");
+function refViewUrl(imageFile, type = DEFAULT_MEDIA_ROOT) {
+    // Accepts either an entry object ({imageFile, type, subfolder}) or a bare
+    // path plus optional root id, so every slot can point at any media root.
+    if (imageFile && typeof imageFile === "object") return mediaViewUrl(imageFile);
+    return mediaViewUrl({
+        relPath: mediaRelPath(imageFile),
+        type: type || DEFAULT_MEDIA_ROOT,
+    });
 }
 
 function deletedSourceRanges(video) {
@@ -5301,11 +5344,11 @@ class MiniMaxH3DirectorEditor {
         this.updateRunSelectUI();
     }
 
-    renderGenSrcSlot(el, imageFile, label) {
+    renderGenSrcSlot(el, imageFile, label, type = DEFAULT_MEDIA_ROOT) {
         if (!el) return;
         el.classList.toggle("has-img", !!imageFile);
         if (imageFile) {
-            el.innerHTML = `<img src="${refViewUrl(imageFile)}" alt="">`;
+            el.innerHTML = `<img src="${refViewUrl(imageFile, type)}" alt="">`;
         } else {
             el.textContent = label;
         }
@@ -5489,13 +5532,18 @@ class MiniMaxH3DirectorEditor {
             try {
                 const uploaded = await uploadToInput(file);
                 const relPath = videoRelativePath(uploaded);
+                const genEntry = {
+                    imageFile: relPath,
+                    subfolder: uploaded?.subfolder || "",
+                    type: uploaded?.type || DEFAULT_MEDIA_ROOT,
+                };
                 if (isGlobal) {
                     this.timeline.global = this.timeline.global || { refs: [] };
-                    this.timeline.global.genImage = { imageFile: relPath };
+                    this.timeline.global.genImage = genEntry;
                 } else {
                     const seg = this.timeline.segments[this.selectedIndex];
                     if (seg) {
-                        seg.genImage = { imageFile: relPath };
+                        seg.genImage = { ...genEntry };
                         seg.imageFile = relPath;
                     }
                 }
@@ -8073,15 +8121,24 @@ class MiniMaxH3DirectorEditor {
         });
     }
 
-    async listInputMedia(kind) {
-        const resp = await api.fetchApi(`/minimax/director/list_input_media?kind=${encodeURIComponent(kind)}`);
+    async listInputMedia(kind, { root = "", query = "", limit = 400 } = {}) {
+        const params = new URLSearchParams({ kind });
+        if (root) params.set("root", root);
+        if (query) params.set("q", query);
+        if (limit) params.set("limit", String(limit));
+        const resp = await api.fetchApi(`/minimax/director/list_input_media?${params.toString()}`);
         if (!resp.ok) {
             const text = (await resp.text()).trim();
             if (resp.status === 404) throw new Error(t("mediaPicker.needRestart"));
             throw new Error(text || `HTTP ${resp.status}`);
         }
         const data = await resp.json();
-        return Array.isArray(data?.items) ? data.items : [];
+        const items = Array.isArray(data?.items) ? data.items : [];
+        return {
+            items,
+            total: Number(data?.total ?? items.length) || items.length,
+            truncated: !!data?.truncated,
+        };
     }
 
     probeInputImageDimensions(relPath, type = "input") {
@@ -8160,12 +8217,17 @@ class MiniMaxH3DirectorEditor {
                 th.querySelector("span").textContent = label;
             });
 
-            let selectedValue = currentValue || "";
+            let selectedValue = "";
+            const preselectValue = String(currentValue || "");
             let itemsByPath = new Map();
             let listedItems = [];
+            let listedTotal = 0;
+            let listedTruncated = false;
             let sortKey = "time";
             let sortDir = "desc";
             let view = readMediaPickerView();
+            let rootFilter = readMediaPickerRoot();
+            let searchText = "";
             let listBtn;
             let thumbsBtn;
 
@@ -8435,18 +8497,21 @@ class MiniMaxH3DirectorEditor {
                     return;
                 }
                 if (!selectedValue || !itemsByPath.has(selectedValue)) {
-                    selectedValue = rows[0].relPath || "";
+                    selectedValue = rows[0] ? mediaKey(rows[0]) : "";
                 }
                 for (const item of rows) {
                     const row = document.createElement("div");
                     row.className = "bd-media-tr";
-                    row.dataset.path = item.relPath;
+                    row.dataset.path = mediaKey(item);
                     const nameTd = document.createElement("div");
                     nameTd.className = "bd-media-td bd-media-td-name";
                     const mediaPrefix = kind === "reference_audio"
                         ? (item.mediaKind === "video" ? "🎞 " : "♪ ")
                         : "";
-                    nameTd.textContent = `${mediaPrefix}${item.relPath || item.fileName || item.name || ""}`;
+                    const rootTag = String(item.type || DEFAULT_MEDIA_ROOT) === DEFAULT_MEDIA_ROOT
+                        ? ""
+                        : `[${item.rootLabel || item.type}] `;
+                    nameTd.textContent = `${mediaPrefix}${rootTag}${item.relPath || item.fileName || item.name || ""}`;
                     nameTd.title = nameTd.textContent;
                     const timeTd = document.createElement("div");
                     timeTd.className = "bd-media-td bd-media-td-time";
@@ -8459,7 +8524,7 @@ class MiniMaxH3DirectorEditor {
                     } else {
                         row.append(nameTd, timeTd);
                     }
-                    row.addEventListener("click", () => selectRow(item.relPath));
+                    row.addEventListener("click", () => selectRow(mediaKey(item)));
                     row.addEventListener("dblclick", () => {
                         const choice = selectedChoice();
                         if (choice) finish(choice);
@@ -8484,14 +8549,14 @@ class MiniMaxH3DirectorEditor {
                     return;
                 }
                 if (!selectedValue || !itemsByPath.has(selectedValue)) {
-                    selectedValue = rows[0].relPath || "";
+                    selectedValue = rows[0] ? mediaKey(rows[0]) : "";
                 }
                 ensureThumbObserver();
                 for (const item of rows) {
                     const card = document.createElement("button");
                     card.type = "button";
                     card.className = "bd-media-card";
-                    card.dataset.path = item.relPath;
+                    card.dataset.path = mediaKey(item);
                     const previewKind = thumbKind(item);
                     const src = inputViewUrl(item.relPath, item.type || "input");
                     const thumbCss = "display:block;width:100%;height:94px;object-fit:cover;background:#090909;border-radius:4px";
@@ -8521,10 +8586,13 @@ class MiniMaxH3DirectorEditor {
                     }
                     const name = document.createElement("span");
                     name.className = "bd-media-card-name";
-                    name.textContent = item.relPath || item.fileName || item.name || "";
+                    const cardRootTag = String(item.type || DEFAULT_MEDIA_ROOT) === DEFAULT_MEDIA_ROOT
+                        ? ""
+                        : `[${item.rootLabel || item.type}] `;
+                    name.textContent = `${cardRootTag}${item.relPath || item.fileName || item.name || ""}`;
                     name.title = name.textContent;
                     card.appendChild(name);
-                    card.addEventListener("click", () => selectRow(item.relPath));
+                    card.addEventListener("click", () => selectRow(mediaKey(item)));
                     card.addEventListener("dblclick", () => {
                         const choice = selectedChoice();
                         if (choice) finish(choice);
@@ -8557,26 +8625,60 @@ class MiniMaxH3DirectorEditor {
             const moveSelection = (delta) => {
                 const rows = sortedItems();
                 if (!rows.length) return;
-                const idx = rows.findIndex((item) => item.relPath === selectedValue);
+                const idx = rows.findIndex((item) => mediaKey(item) === selectedValue);
                 const next = rows[Math.max(0, Math.min(rows.length - 1, (idx < 0 ? 0 : idx) + delta))];
-                if (next) selectRow(next.relPath, { scroll: true });
+                if (next) selectRow(mediaKey(next), { scroll: true });
+            };
+
+            /**
+             * Map an incoming slot value onto a listed item key.
+             * Legacy timelines store a bare path; the input root wins ties.
+             */
+            const resolvePreselectKey = (raw) => {
+                const text = String(raw || "");
+                if (!text) return "";
+                if (itemsByPath.has(text)) return text;
+                const bare = parseMediaKey(text).relPath || text;
+                const matches = listedItems.filter((item) => item.relPath === bare);
+                if (!matches.length) return "";
+                const preferred = matches.find(
+                    (item) => String(item.type || DEFAULT_MEDIA_ROOT) === DEFAULT_MEDIA_ROOT,
+                );
+                return mediaKey(preferred || matches[0]);
             };
 
             const loadItems = async () => {
+                if (!panel.isConnected) return;
                 statusEl.textContent = t("mediaPicker.loading");
                 tbodyEl.innerHTML = "";
                 galleryEl.innerHTML = "";
                 renderPreview(null);
                 try {
-                    listedItems = await this.listInputMedia(kind);
-                    itemsByPath = new Map(listedItems.map((item) => [item.relPath, item]));
+                    const payload = await this.listInputMedia(kind, {
+                        root: rootFilter,
+                        query: searchText,
+                    });
+                    if (!panel.isConnected) return;
+                    listedItems = payload.items;
+                    listedTotal = payload.total;
+                    listedTruncated = payload.truncated;
+                    // Key by root + path: input/ and output/ may hold the same name.
+                    itemsByPath = new Map(listedItems.map((item) => [mediaKey(item), item]));
+                    selectedValue = resolvePreselectKey(preselectValue);
                     renderBrowser();
                     statusEl.textContent = listedItems.length
-                        ? t("mediaPicker.count", { n: listedItems.length })
+                        ? (listedTruncated
+                            ? t("mediaPicker.countTruncated", {
+                                n: listedItems.length,
+                                total: listedTotal,
+                            })
+                            : t("mediaPicker.count", { n: listedItems.length }))
                         : t("mediaPicker.empty");
                 } catch (err) {
                     listedItems = [];
                     itemsByPath = new Map();
+                    listedTotal = 0;
+                    listedTruncated = false;
                     tbodyEl.innerHTML = "";
                     galleryEl.innerHTML = "";
                     statusEl.textContent = err?.message || String(err);
@@ -8616,6 +8718,60 @@ class MiniMaxH3DirectorEditor {
             listBtn.onclick = () => setView("list");
             thumbsBtn.onclick = () => setView("thumbs");
             viewToggle.append(listBtn, thumbsBtn);
+
+            // Media roots: input / output / user-configured directories
+            // (media_roots.json). "All" is the default so generated assets are
+            // visible without switching tabs first.
+            const rootBar = document.createElement("div");
+            rootBar.className = "bd-media-roots";
+            const syncRootButtons = () => {
+                for (const btn of rootBar.querySelectorAll("button[data-root]")) {
+                    btn.classList.toggle("bd-btn-primary", btn.dataset.root === rootFilter);
+                }
+            };
+            const setRootFilter = (next) => {
+                const value = String(next || "");
+                if (value === rootFilter) return;
+                rootFilter = value;
+                writeMediaPickerRoot(rootFilter);
+                syncRootButtons();
+                void loadItems();
+            };
+            const buildRootBar = (roots) => {
+                rootBar.innerHTML = "";
+                const entries = [{ id: "", label: t("mediaPicker.rootAll") }, ...roots.map((root) => ({
+                    id: root.id,
+                    label: mediaRootLabel(root),
+                    title: root.path || "",
+                }))];
+                for (const entry of entries) {
+                    const btn = document.createElement("button");
+                    btn.type = "button";
+                    btn.className = "bd-btn";
+                    btn.dataset.root = entry.id;
+                    btn.textContent = entry.label;
+                    if (entry.title) btn.title = entry.title;
+                    btn.onclick = () => setRootFilter(entry.id);
+                    rootBar.appendChild(btn);
+                }
+                syncRootButtons();
+            };
+
+            const searchInput = document.createElement("input");
+            searchInput.type = "search";
+            searchInput.className = "bd-media-search";
+            searchInput.placeholder = t("mediaPicker.search");
+            let searchTimer = 0;
+            searchInput.addEventListener("input", () => {
+                searchText = searchInput.value.trim();
+                window.clearTimeout(searchTimer);
+                searchTimer = window.setTimeout(() => {
+                    void loadItems();
+                }, 300);
+            });
+
+            actionsTop.appendChild(rootBar);
+            actionsTop.appendChild(searchInput);
             actionsTop.appendChild(viewToggle);
 
             const refreshBtn = document.createElement("button");
@@ -8690,7 +8846,18 @@ class MiniMaxH3DirectorEditor {
             this.root.appendChild(overlay);
             this._modalEl = overlay;
             applyViewClass();
-            void loadItems();
+            // Load the root list first so a remembered custom root that no longer
+            // exists cannot leave the picker showing an empty listing.
+            void (async () => {
+                const roots = await loadMediaRoots();
+                if (!panel.isConnected) return;
+                if (rootFilter && !roots.some((root) => root.id === rootFilter)) {
+                    rootFilter = "";
+                    writeMediaPickerRoot("");
+                }
+                buildRootBar(roots);
+                await loadItems();
+            })();
             if (view === "thumbs") galleryEl.focus();
             else tableEl.focus();
         });
@@ -10402,9 +10569,11 @@ class MiniMaxH3DirectorEditor {
                 (a, b) => Number(a.index ?? a.slot ?? 0) - Number(b.index ?? b.slot ?? 0),
             );
             const commonRefs = listCommonImageRefs(this);
-            const imgFile = refs.find((r) => r?.imageFile)?.imageFile
-                || commonRefs.find((r) => r?.imageFile)?.imageFile
-                || "";
+            const refImg = refs.find((r) => r?.imageFile)
+                || commonRefs.find((r) => r?.imageFile)
+                || null;
+            const imgFile = refImg?.imageFile || "";
+            const imgType = refImg?.type || refImg?.root || DEFAULT_MEDIA_ROOT;
             const previewB64 = seg.previewB64 || (Array.isArray(seg.previewFrames) ? seg.previewFrames[0] : "");
             const vidRef = [...(seg.refVideos || [])]
                 .sort((a, b) => Number(a.index ?? a.slot ?? 0) - Number(b.index ?? b.slot ?? 0))
@@ -10416,7 +10585,7 @@ class MiniMaxH3DirectorEditor {
             let cacheKey = "";
             let srcKind = "";
             if (imgFile) {
-                cacheKey = `r2v:${imgFile}`;
+                cacheKey = `r2v:${imgType}:${imgFile}`;
                 srcKind = "image";
             } else if (previewB64) {
                 cacheKey = `r2v-prev:${seg.id || startX}`;
@@ -10425,7 +10594,7 @@ class MiniMaxH3DirectorEditor {
                 cacheKey = `r2v-vid:${vidType}:${vidPath}`;
                 srcKind = "video";
             } else if (posterFile || posterUrl) {
-                cacheKey = `r2v-vid-poster:${posterFile || posterUrl}`;
+                cacheKey = `r2v-vid-poster:${vidType}:${posterFile || posterUrl}`;
                 srcKind = "poster";
             }
             const drawCached = (img) => {
@@ -10457,9 +10626,9 @@ class MiniMaxH3DirectorEditor {
                             this.scheduleRender();
                         };
                         el.onerror = () => this._thumbPending.delete(cacheKey);
-                        if (srcKind === "image") el.src = refViewUrl(imgFile);
+                        if (srcKind === "image") el.src = refViewUrl(imgFile, imgType);
                         else if (srcKind === "poster") {
-                            el.src = posterUrl || refViewUrl(posterFile);
+                            el.src = posterUrl || refViewUrl(posterFile, vidType);
                         } else {
                             el.src = String(previewB64).startsWith("data:")
                                 ? previewB64
@@ -10482,9 +10651,10 @@ class MiniMaxH3DirectorEditor {
             ctx.fillStyle = "#0d0d0d";
             ctx.fillRect(startX, y0 + 1, pxWidth, h - 2);
             const imgFile = seg.genImage?.imageFile || seg.imageFile || "";
+            const imgType = seg.genImage?.type || seg.genImage?.root || DEFAULT_MEDIA_ROOT;
             const previewB64 = seg.previewB64 || (Array.isArray(seg.previewFrames) ? seg.previewFrames[0] : "");
             const cacheKey = imgFile
-                ? `i2v:${imgFile}`
+                ? `i2v:${imgType}:${imgFile}`
                 : (previewB64 ? `i2v-prev:${seg.id || startX}` : "");
             const drawCached = (img) => {
                 if (!img?.naturalWidth && !img?.width) return false;
@@ -10512,7 +10682,7 @@ class MiniMaxH3DirectorEditor {
                         this.scheduleRender();
                     };
                     el.onerror = () => this._thumbPending.delete(cacheKey);
-                    if (imgFile) el.src = refViewUrl(imgFile);
+                    if (imgFile) el.src = refViewUrl(imgFile, imgType);
                     else {
                         el.src = String(previewB64).startsWith("data:")
                             ? previewB64
@@ -10582,13 +10752,15 @@ class MiniMaxH3DirectorEditor {
         }
 
         if (this.isGenImage()) {
-            const imgFile = this.isGlobalMode()
-                ? this.timeline.global?.genImage?.imageFile
-                : (seg.genImage?.imageFile || "");
+            const genRef = this.isGlobalMode()
+                ? this.timeline.global?.genImage
+                : seg.genImage;
+            const imgFile = genRef?.imageFile || "";
+            const imgType = genRef?.type || genRef?.root || DEFAULT_MEDIA_ROOT;
             ctx.fillStyle = "#111";
             ctx.fillRect(startX, y0 + 1, pxWidth, h - 2);
             if (imgFile) {
-                const cacheKey = `gen:${imgFile}`;
+                const cacheKey = `gen:${imgType}:${imgFile}`;
                 let img = this._thumbCache.get(cacheKey);
                 if (img?.naturalWidth) {
                     const ratio = img.naturalWidth / img.naturalHeight;
@@ -10605,7 +10777,7 @@ class MiniMaxH3DirectorEditor {
                         this.scheduleRender();
                     };
                     el.onerror = () => this._thumbPending.delete(cacheKey);
-                    el.src = refViewUrl(imgFile);
+                    el.src = refViewUrl(imgFile, imgType);
                 }
             } else {
                 ctx.fillStyle = "#666";
@@ -11252,6 +11424,7 @@ class MiniMaxH3DirectorEditor {
                 this.genGlobalImg,
                 this.timeline.global?.genImage?.imageFile,
                 t("panel.uploadSourceImage"),
+                this.timeline.global?.genImage?.type || DEFAULT_MEDIA_ROOT,
             );
         }
         if (this.isGenMode() && this.isGlobalMode()) {
@@ -11279,7 +11452,12 @@ class MiniMaxH3DirectorEditor {
             this.renderRefAudioSlots();
         }
         if (this.isGenImage() && !this.isGlobalMode()) {
-            this.renderGenSrcSlot(this.genSegImg, liveSeg.genImage?.imageFile, t("panel.uploadSegmentSourceImage"));
+            this.renderGenSrcSlot(
+                this.genSegImg,
+                liveSeg.genImage?.imageFile,
+                t("panel.uploadSegmentSourceImage"),
+                liveSeg.genImage?.type || DEFAULT_MEDIA_ROOT,
+            );
         }
         if (this.isGenMode() && !this.isGlobalMode()) {
             const fc = liveSeg.frameCount ?? liveSeg.length ?? defaultFrameCount(this.getTaskKey(), this.getFrameRate());
@@ -11353,7 +11531,7 @@ class MiniMaxH3DirectorEditor {
             if (ref?.imageFile) {
                 el.classList.add("has-img");
                 const img = document.createElement("img");
-                img.src = refViewUrl(ref.imageFile);
+                img.src = refViewUrl(ref.imageFile, ref.type || ref.root || DEFAULT_MEDIA_ROOT);
                 img.draggable = false;
                 el.appendChild(img);
                 if (polished) {
@@ -11589,7 +11767,7 @@ class MiniMaxH3DirectorEditor {
                     el.appendChild(progress);
                     const audio = document.createElement("audio");
                     audio.preload = "metadata";
-                    audio.src = refViewUrl(file);
+                    audio.src = refViewUrl(file, ref?.type || ref?.root || DEFAULT_MEDIA_ROOT);
                     audio.className = "bd-r2v-media";
                     el.appendChild(audio);
                     bindR2vMediaPlayback(audio, playBtn, progress);
@@ -11726,7 +11904,9 @@ class MiniMaxH3DirectorEditor {
             const ref = (target.refVideos || []).find((r) => Number(r.index ?? r.slot) === i);
             const file = ref?.videoFile || "";
             const posterSrc = ref?.previewImageUrl
-                || (ref?.previewImageFile ? refViewUrl(ref.previewImageFile) : "");
+                || (ref?.previewImageFile
+                    ? refViewUrl(ref.previewImageFile, ref?.type || ref?.root || DEFAULT_MEDIA_ROOT)
+                    : "");
             const hasMedia = !!(file || posterSrc || ref?.linked);
             const titleFile = file || ref?.fileName || ref?.previewImageFile || "";
             el.title = hasMedia
@@ -11748,7 +11928,7 @@ class MiniMaxH3DirectorEditor {
                 video.preload = "metadata";
                 video.muted = true;
                 video.playsInline = true;
-                video.src = refViewUrl(file);
+                video.src = refViewUrl(file, ref?.type || ref?.root || DEFAULT_MEDIA_ROOT);
                 video.className = "bd-r2v-media";
                 thumb.appendChild(video);
                 const playBtn = document.createElement("button");
@@ -11954,7 +12134,14 @@ class MiniMaxH3DirectorEditor {
             });
             if (!picked?.imageFile) return;
             target.refs = target.refs.filter((r) => Number(r.index ?? r.slot) !== index);
-            target.refs.push({ index, imageFile: picked.imageFile, imageB64: "" });
+            target.refs.push({
+                index,
+                imageFile: picked.imageFile,
+                imageB64: "",
+                subfolder: picked.subfolder || "",
+                type: picked.type || DEFAULT_MEDIA_ROOT,
+                fileName: picked.fileName || picked.imageFile,
+            });
             if (isGlobal) {
                 this.timeline.global = target;
                 if (this.isR2vCommonEnabled()) {
@@ -12029,7 +12216,13 @@ class MiniMaxH3DirectorEditor {
             const uploaded = await uploadToInput(file);
             const relPath = videoRelativePath(uploaded);
             target.refs = target.refs.filter((r) => Number(r.index ?? r.slot) !== index);
-            target.refs.push({ index, imageFile: relPath, imageB64: "" });
+            target.refs.push({
+                index,
+                imageFile: relPath,
+                imageB64: "",
+                subfolder: uploaded?.subfolder || "",
+                type: uploaded?.type || DEFAULT_MEDIA_ROOT,
+            });
             if (isGlobal) {
                 this.timeline.global = target;
                 if (this.isR2vCommonEnabled()) {

@@ -32,3 +32,6 @@ _seam_probe_*/
 
 # Registry CLI leftover zip
 node.zip
+
+# Per-machine media roots config (paths differ per install; see media_roots.example.json)
+media_roots.json

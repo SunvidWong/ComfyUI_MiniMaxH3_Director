@@ -187,6 +187,18 @@ def _media_bases() -> list[tuple[str, Path]]:
         bases.append(("temp", Path(folder_paths.get_temp_directory())))
     except Exception:
         pass
+    # User-configured media roots (media_roots.json): packs must still be able to
+    # pull in material that was referenced straight from another drive.
+    try:
+        from ..lib.media_roots import list_media_roots
+
+        known = {str(path) for _kind, path in bases}
+        for root in list_media_roots():
+            if root.comfy_type or str(root.path) in known:
+                continue
+            bases.append((root.id, Path(root.path)))
+    except Exception:
+        pass
     return bases
 
 

@@ -15,6 +15,16 @@ import folder_paths
 from aiohttp import web
 from server import PromptServer
 
+from ..lib.media_roots import (
+    INPUT_ID as INPUT_ROOT_ID,
+    default_root_id,
+    get_media_root,
+    is_within,
+    list_media_roots,
+    normalize_root_id,
+    roots_for_json,
+)
+
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director")
 
 CHUNK_ROOT = os.path.join(folder_paths.get_temp_directory(), "minimax_upload_chunks")
@@ -68,60 +78,125 @@ def _peek_image_size(path: str) -> tuple[int, int]:
         return 0, 0
 
 
-def _list_input_media(kind: str) -> list[dict]:
-    input_dir = folder_paths.get_input_directory()
-    exts = _get_media_exts(kind)
-    peek_video = None
-    if kind == "video":
-        from ..lib.video_io import peek_video_size as peek_video
+def _media_kind_for_ext(ext: str) -> str:
+    if ext in VIDEO_EXTS:
+        return "video"
+    if ext in AUDIO_EXTS:
+        return "audio"
+    return "image"
+
+
+def _iter_root_items(root, exts: set[str]) -> list[dict]:
+    """Walk one media root; no stat-heavy size probing here (see _decorate_items)."""
     items: list[dict] = []
-    for root, dirs, files in os.walk(input_dir):
-        dirs[:] = [d for d in dirs if not d.startswith(".")]
+    excluded = set(root.exclude or ())
+    for current, dirs, files in os.walk(root.path):
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in excluded]
         for name in files:
             if name.startswith("."):
                 continue
             ext = os.path.splitext(name)[1].lower()
             if ext not in exts:
                 continue
-            abs_path = os.path.join(root, name)
+            abs_path = os.path.join(current, name)
             try:
                 stat = os.stat(abs_path)
             except OSError:
                 continue
-            try:
-                rel_path = os.path.relpath(abs_path, input_dir).replace("\\", "/")
-            except ValueError:
-                continue
+            rel_path = os.path.relpath(abs_path, root.path).replace("\\", "/")
             if rel_path.startswith(".."):
                 continue
             subfolder = os.path.dirname(rel_path).replace("\\", "/")
             if subfolder == ".":
                 subfolder = ""
-            width, height = (0, 0)
-            if ext in IMAGE_EXTS:
-                width, height = _peek_image_size(abs_path)
-            elif peek_video is not None and ext in VIDEO_EXTS:
-                try:
-                    width, height = peek_video(abs_path)
-                except Exception:
-                    width, height = 0, 0
             items.append(
                 {
                     "name": name,
                     "fileName": name,
                     "relPath": rel_path,
                     "subfolder": subfolder,
-                    "type": "input",
+                    "type": root.id,
+                    "root": root.id,
+                    "rootLabel": root.label,
+                    "viewType": root.view_type,
                     "modified": float(stat.st_mtime),
-                    "width": width,
-                    "height": height,
-                    "mediaKind": "video" if ext in VIDEO_EXTS else (
-                        "audio" if ext in AUDIO_EXTS else "image"
-                    ),
+                    "size": int(stat.st_size),
+                    "width": 0,
+                    "height": 0,
+                    "mediaKind": _media_kind_for_ext(ext),
+                    "path": abs_path,
                 }
             )
-    items.sort(key=lambda item: (-item["modified"], item["relPath"]))
     return items
+
+
+def _decorate_items(items: list[dict]) -> list[dict]:
+    """Fill width/height for the page we are about to return (header reads only)."""
+    from ..lib.video_io import peek_video_size
+
+    for item in items:
+        ext = os.path.splitext(item["name"])[1].lower()
+        path = item.pop("path", "")
+        if not path:
+            continue
+        if ext in IMAGE_EXTS:
+            item["width"], item["height"] = _peek_image_size(path)
+        elif ext in VIDEO_EXTS:
+            try:
+                item["width"], item["height"] = peek_video_size(path)
+            except Exception:
+                item["width"], item["height"] = 0, 0
+    return items
+
+
+def _list_media(
+    kind: str,
+    *,
+    roots: list[str] | None = None,
+    limit: int = 400,
+    offset: int = 0,
+    query: str = "",
+) -> dict:
+    """List media across media roots.
+
+    ``roots=None`` means "every configured root" (input, output, custom).
+    Sizes are probed only for the returned page, and every root is walked
+    before sorting so the newest files win regardless of which root they sit in.
+    """
+    exts = _get_media_exts(kind)
+    all_roots = list_media_roots()
+    wanted = [normalize_root_id(r) for r in (roots or []) if str(r or "").strip()]
+    if wanted:
+        selected = [root for root in all_roots if root.id in wanted]
+    else:
+        selected = list(all_roots)
+
+    needle = str(query or "").strip().lower()
+    found: list[dict] = []
+    for root in selected:
+        for item in _iter_root_items(root, exts):
+            if needle and needle not in item["relPath"].lower():
+                continue
+            found.append(item)
+    found.sort(key=lambda item: (-item["modified"], item["root"], item["relPath"]))
+
+    total = len(found)
+    offset = max(0, int(offset))
+    limit = max(1, min(int(limit), 5000))
+    page = found[offset : offset + limit]
+    return {
+        "items": _decorate_items(page),
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "truncated": offset + len(page) < total,
+        "roots": [root.id for root in selected],
+    }
+
+
+def _list_input_media(kind: str) -> list[dict]:
+    """Legacy single-root listing (input only, no limit) kept for callers."""
+    return _list_media(kind, roots=[INPUT_ROOT_ID], limit=5000)["items"]
 
 
 async def minimax_upload_video_chunk(request):
@@ -408,17 +483,75 @@ async def minimax_probe_video(request):
 
 
 async def minimax_list_input_media(request):
+    """List media files across the configured media roots (input / output / custom).
+
+    Query params: ``kind`` (required), ``root`` (comma separated root ids, default
+    all), ``q`` (case-insensitive substring filter), ``limit`` (default 400),
+    ``offset`` (paging).
+    """
     try:
         kind = str(request.query.get("kind") or "").strip().lower()
         if not kind:
             return web.Response(status=400, text="Missing kind.")
-        items = _list_input_media(kind)
+        roots_param = request.query.get("root") or request.query.get("roots") or ""
+        roots = [part for part in re.split(r"[,\s]+", roots_param) if part]
+        try:
+            limit = int(request.query.get("limit") or 400)
+        except (TypeError, ValueError):
+            limit = 400
+        try:
+            offset = int(request.query.get("offset") or 0)
+        except (TypeError, ValueError):
+            offset = 0
+        query = str(request.query.get("q") or "")
+        # Walking output/ can touch thousands of files: keep it off the event loop.
+        payload = await asyncio.to_thread(
+            _list_media, kind, roots=roots, limit=limit, offset=offset, query=query
+        )
     except ValueError as exc:
         return web.Response(status=400, text=str(exc))
     except Exception as exc:
-        log.warning("MiniMax H3 Director list input media failed: %s", exc)
+        log.warning("MiniMax H3 Director list media failed: %s", exc)
         return web.Response(status=500, text=str(exc))
-    return web.json_response({"items": items})
+    return web.json_response(payload)
+
+
+async def minimax_media_roots(request):
+    """Describe the media roots the picker may browse (id / label / view type)."""
+    try:
+        input_root = get_media_root(INPUT_ROOT_ID)
+        payload = {
+            "default": default_root_id(),
+            "roots": roots_for_json(),
+            "inputDir": input_root.path if input_root else "",
+        }
+    except Exception as exc:
+        log.warning("MiniMax H3 Director media roots failed: %s", exc)
+        return web.Response(status=500, text=str(exc))
+    return web.json_response(payload)
+
+
+async def minimax_media_file(request):
+    """Serve one file from any configured media root (used for custom roots).
+
+    ComfyUI's own ``/view`` only understands input/output/temp, so the picker
+    falls back to this route for user-configured directories. The client passes a
+    root **id** plus a relative path; absolute paths and traversal are rejected.
+    """
+    root = get_media_root(request.query.get("id"))
+    if root is None:
+        return web.Response(status=404, text="Unknown media root.")
+    rel = str(request.query.get("rel") or "").replace("\\", "/").strip().lstrip("/")
+    if not rel:
+        return web.Response(status=400, text="Missing rel.")
+    if os.path.isabs(rel) or ".." in rel.split("/"):
+        return web.Response(status=400, text="Invalid rel path.")
+    path = os.path.normpath(os.path.join(root.path, rel.replace("/", os.sep)))
+    if not is_within(root.path, path) or not os.path.isfile(path):
+        return web.Response(status=404, text="File not found.")
+    response = web.FileResponse(path)
+    response.headers["Cache-Control"] = "private, max-age=60"
+    return response
 
 
 async def minimax_detect_shots(request):
@@ -655,6 +788,8 @@ def register_routes() -> bool:
     _register_route(routes, "POST", "/minimax/director/probe_video", minimax_probe_video)
     _register_route(routes, "GET", "/minimax/director/probe_video", minimax_probe_video)
     _register_route(routes, "GET", "/minimax/director/list_input_media", minimax_list_input_media)
+    _register_route(routes, "GET", "/minimax/director/media_roots", minimax_media_roots)
+    _register_route(routes, "GET", "/minimax/director/media_file", minimax_media_file)
     _register_route(routes, "POST", "/minimax/director/detect_shots", minimax_detect_shots)
     _register_route(
         routes,

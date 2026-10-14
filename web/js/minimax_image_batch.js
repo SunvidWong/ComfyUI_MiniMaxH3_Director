@@ -694,12 +694,17 @@ function relPath(upload) {
     return sub ? `${sub}/${name}` : name;
 }
 
-function viewUrl(imageFile) {
+function viewUrl(imageFile, type = "input") {
+    const rootId = String(type || "input");
     const norm = String(imageFile || "").replace(/\\/g, "/");
+    if (rootId !== "input" && rootId !== "output" && rootId !== "temp") {
+        const params = new URLSearchParams({ id: rootId, rel: norm });
+        return api.apiURL(`/minimax/director/media_file?${params.toString()}`);
+    }
     const slash = norm.lastIndexOf("/");
     const filename = slash >= 0 ? norm.slice(slash + 1) : norm;
     const subfolder = slash >= 0 ? norm.slice(0, slash) : "";
-    const params = new URLSearchParams({ filename, type: "input" });
+    const params = new URLSearchParams({ filename, type: rootId });
     if (subfolder) params.set("subfolder", subfolder);
     return api.apiURL(`/view?${params.toString()}`);
 }
@@ -1204,12 +1209,18 @@ function bindMixedFl2vSlots(slotsEl, editor, index) {
     });
 }
 
-function applySegSourceImage(editor, index, imageFile, width = 0, height = 0) {
+function applySegSourceImage(editor, index, imageFile, width = 0, height = 0, type = "input", subfolder = "") {
     const segId = editor.timeline.segments[index]?.id;
     const seg = (editor.timeline.segments || []).find((s) => s.id === segId)
         || editor.timeline.segments[index];
     if (!seg) return;
-    seg.genImage = { imageFile, width: width || 0, height: height || 0 };
+    seg.genImage = {
+        imageFile,
+        width: width || 0,
+        height: height || 0,
+        type: type || "input",
+        subfolder: subfolder || "",
+    };
     seg.imageFile = imageFile;
     editor.renderImageBatchGroups();
     editor.updateOutputPreview?.();
@@ -1225,12 +1236,17 @@ async function assignSegSourceFromFile(editor, index, file) {
         const uploaded = await uploadImage(file);
         const imageFile = relPath(uploaded);
         if (!imageFile) throw new Error("Upload returned empty filename");
-        applySegSourceImage(editor, index, imageFile, 0, 0);
+        applySegSourceImage(editor, index, imageFile, 0, 0, uploaded?.type || "input", uploaded?.subfolder || "");
         try {
             const dims = await readImageDimensions(file);
             const live = (editor.timeline.segments || []).find((s) => s.id === segId) || editor.timeline.segments[index];
             if (live?.genImage?.imageFile === imageFile) {
-                live.genImage = { imageFile, width: dims.width, height: dims.height };
+                live.genImage = {
+                    ...live.genImage,
+                    imageFile,
+                    width: dims.width,
+                    height: dims.height,
+                };
                 editor.updateOutputPreview?.();
                 editor.scheduleTimelineSync?.();
             }
@@ -1256,7 +1272,15 @@ async function pickExistingSegSource(editor, index) {
             currentValue: editor.timeline.segments[index]?.genImage?.imageFile || "",
         });
         if (!picked?.imageFile) return;
-        applySegSourceImage(editor, index, picked.imageFile, picked.width, picked.height);
+        applySegSourceImage(
+            editor,
+            index,
+            picked.imageFile,
+            picked.width,
+            picked.height,
+            picked.type || "input",
+            picked.subfolder || "",
+        );
     } catch (err) {
         console.error("[MiniMax H3Director] batch source pick failed:", err);
         alert(t("upload.alertFailed", { err: err?.message || err }));
@@ -1286,7 +1310,13 @@ async function assignSegRefFromFile(editor, index, slot, file) {
         const seg = editor.timeline.segments[index];
         if (!seg) return;
         seg.refs = (seg.refs || []).filter((r) => Number(r.index ?? r.slot) !== slot);
-        seg.refs.push({ index: slot, imageFile: relPath(uploaded), imageB64: "" });
+        seg.refs.push({
+            index: slot,
+            imageFile: relPath(uploaded),
+            imageB64: "",
+            subfolder: uploaded?.subfolder || "",
+            type: uploaded?.type || "input",
+        });
         editor.renderImageBatchGroups();
         editor.commit();
     } catch (err) {
@@ -1303,7 +1333,14 @@ async function assignSegRefFromPicked(editor, index, slot, picked) {
     const seg = editor.timeline.segments[index];
     if (!seg) return;
     seg.refs = (seg.refs || []).filter((r) => Number(r.index ?? r.slot) !== slot);
-    seg.refs.push({ index: slot, imageFile: picked.imageFile, imageB64: "" });
+    seg.refs.push({
+        index: slot,
+        imageFile: picked.imageFile,
+        imageB64: "",
+        subfolder: picked.subfolder || "",
+        type: picked.type || "input",
+        fileName: picked.fileName || picked.imageFile,
+    });
     editor.renderImageBatchGroups();
     editor.commit();
 }
@@ -1704,7 +1741,7 @@ function renderAudioSlot(el, ref, slot, index, editor, { r2v = false } = {}) {
             el.appendChild(progress);
             const audio = document.createElement("audio");
             audio.preload = "metadata";
-            audio.src = viewUrl(file);
+            audio.src = viewUrl(file, ref?.type || "input");
             audio.className = "bd-r2v-media";
             el.appendChild(audio);
             bindR2vMediaPlayback(audio, playBtn, progress);
@@ -1747,7 +1784,7 @@ function renderVideoSlot(el, ref, slot, index, editor, { r2v = false } = {}) {
     const label = refVideoLabel(slot);
     const file = ref?.videoFile || "";
     const posterSrc = ref?.previewImageUrl
-        || (ref?.previewImageFile ? viewUrl(ref.previewImageFile) : "");
+        || (ref?.previewImageFile ? viewUrl(ref.previewImageFile, ref?.type || "input") : "");
     const hasMedia = !!(file || posterSrc || ref?.linked);
     const titleFile = file || ref?.fileName || ref?.previewImageFile || "";
     el.className = `bd-batch-video${hasMedia ? " has-video" : ""}`;
@@ -1773,7 +1810,7 @@ function renderVideoSlot(el, ref, slot, index, editor, { r2v = false } = {}) {
             video.preload = "metadata";
             video.muted = true;
             video.playsInline = true;
-            video.src = viewUrl(file);
+            video.src = viewUrl(file, ref?.type || "input");
             video.className = "bd-r2v-media";
             thumb.appendChild(video);
             const playBtn = document.createElement("button");
@@ -1898,7 +1935,7 @@ function appendR2vMediaSections(card, seg, index, editor) {
             slot.className = "bd-batch-ref has-img";
             slot.title = t("batch.r2v.commonInheritTip", { label: refImageLabel(abs) });
             const img = document.createElement("img");
-            img.src = viewUrl(ref.imageFile);
+            img.src = viewUrl(ref.imageFile, ref.type || ref.root || "input");
             img.draggable = false;
             slot.appendChild(img);
             const cap = document.createElement("span");
@@ -2164,7 +2201,7 @@ function renderR2vRefSlot(el, ref, slot, index, editor) {
     el.title = t("ref.clickUploadMove", { label });
     if (has) {
         const img = document.createElement("img");
-        img.src = viewUrl(ref.imageFile);
+        img.src = viewUrl(ref.imageFile, ref.type || ref.root || "input");
         img.draggable = false;
         el.appendChild(img);
         const dot = document.createElement("span");
@@ -2187,10 +2224,10 @@ function renderR2vRefSlot(el, ref, slot, index, editor) {
     }
 }
 
-function renderSourceSlot(el, imageFile) {
+function renderSourceSlot(el, imageFile, type = "input") {
     el.classList.toggle("has-img", !!imageFile);
     if (imageFile) {
-        el.innerHTML = `<img src="${viewUrl(imageFile)}" alt="">`;
+        el.innerHTML = `<img src="${viewUrl(imageFile, type)}" alt="">`;
     } else {
         el.textContent = t("batch.uploadSource");
     }
@@ -2203,7 +2240,7 @@ function renderRefSlot(el, ref, slot, index, editor) {
     el.title = t("ref.clickUploadMove", { label });
     if (ref?.imageFile) {
         const img = document.createElement("img");
-        img.src = viewUrl(ref.imageFile);
+        img.src = viewUrl(ref.imageFile, ref.type || ref.root || "input");
         img.draggable = false;
         el.appendChild(img);
         const x = document.createElement("span");
@@ -2283,9 +2320,9 @@ function mountVideoPreview(el, seg, running, fps, editor) {
     const frames = (seg.previewFrames?.length ? seg.previewFrames : null)
         || (seg.previewB64 ? [seg.previewB64] : null);
     if (!frames?.length) {
-        const refFile = firstRefPreviewFile(editor, seg);
-        if (refFile) {
-            mountRefStillPreview(el, refFile);
+        const refEntry = firstRefPreviewEntry(editor, seg);
+        if (refEntry?.imageFile) {
+            mountRefStillPreview(el, refEntry.imageFile, refEntry.type || "input");
             return;
         }
         el.textContent = t("batch.previewVideoAfterRun");
@@ -2341,18 +2378,23 @@ function mountVideoPreview(el, seg, running, fps, editor) {
     };
 }
 
-function firstRefPreviewFile(editor, seg) {
-    const groupFile = [...(seg?.refs || [])]
-        .sort((a, b) => Number(a.index ?? a.slot ?? 0) - Number(b.index ?? b.slot ?? 0))
-        .find((r) => r?.imageFile)?.imageFile;
-    if (groupFile) return groupFile;
-    return listCommonImageRefs(editor).find((r) => r?.imageFile)?.imageFile || "";
+function firstRefPreviewEntry(editor, seg) {
+    const ordered = [...(seg?.refs || [])]
+        .sort((a, b) => Number(a.index ?? a.slot ?? 0) - Number(b.index ?? b.slot ?? 0));
+    const groupRef = ordered.find((r) => r?.imageFile);
+    if (groupRef) return groupRef;
+    const commonRef = listCommonImageRefs(editor).find((r) => r?.imageFile);
+    return commonRef || null;
 }
 
-function mountRefStillPreview(el, imageFile) {
+function firstRefPreviewFile(editor, seg) {
+    return firstRefPreviewEntry(editor, seg)?.imageFile || "";
+}
+
+function mountRefStillPreview(el, imageFile, type = "input") {
     el.innerHTML = "";
     const img = document.createElement("img");
-    img.src = viewUrl(imageFile);
+    img.src = viewUrl(imageFile, type);
     img.alt = "ref preview";
     el.appendChild(img);
 }
@@ -2380,9 +2422,9 @@ function renderImagePreview(el, seg, running, editor) {
         el.appendChild(img);
         return;
     }
-    const refFile = firstRefPreviewFile(editor, seg);
-    if (refFile) {
-        mountRefStillPreview(el, refFile);
+    const refEntry = firstRefPreviewEntry(editor, seg);
+    if (refEntry?.imageFile) {
+        mountRefStillPreview(el, refEntry.imageFile, refEntry.type || "input");
         return;
     }
     el.textContent = t("batch.previewAfterRun");
@@ -2840,7 +2882,7 @@ function appendBatchCard(list, editor, seg, index, ctx) {
             media.className = "bd-batch-media";
             const src = document.createElement("div");
             src.className = "bd-batch-src";
-            renderSourceSlot(src, seg.genImage?.imageFile);
+            renderSourceSlot(src, seg.genImage?.imageFile, seg.genImage?.type || "input");
             src.onclick = () => uploadSegSource(editor, index);
             bindOsFileDrop(src, (files) => {
                 const file = files.find(isBatchImageFile);

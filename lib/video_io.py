@@ -30,25 +30,25 @@ def _require_cv2():
 
 
 def resolve_video_path(video: dict) -> str:
-    """Resolve timeline video metadata to an absolute path under ComfyUI input."""
+    """Resolve timeline video metadata to an absolute path.
+
+    Root-aware: honours ``type``/``root`` (ComfyUI ``input`` / ``output`` or a
+    configured media root). Entries without one keep the historical behaviour
+    (``input`` first) and fall back to the other roots.
+    """
+    from .media_roots import describe_missing, resolve_media_path
+
     video_file = (video.get("videoFile") or video.get("fileName") or "").strip()
     if not video_file:
         raise ValueError("No video file in MiniMax H3 Director timeline.")
 
-    base = folder_paths.get_input_directory()
-    subfolder = (video.get("subfolder") or "").strip().replace("\\", "/")
+    path = resolve_media_path(video, keys=("videoFile", "fileName"))
+    if path:
+        return path
 
-    candidates = []
-    if subfolder and not video_file.startswith(subfolder):
-        candidates.append(os.path.join(base, subfolder, os.path.basename(video_file)))
-    candidates.append(os.path.join(base, video_file.replace("/", os.sep)))
-    candidates.append(os.path.join(base, os.path.basename(video_file)))
-
-    for path in candidates:
-        if os.path.isfile(path):
-            return path
-
-    raise ValueError(f"Video file not found in ComfyUI input: {video_file}")
+    raise ValueError(
+        f"Video file not found — {describe_missing(video, keys=('videoFile', 'fileName'))}"
+    )
 
 
 def ffprobe_bin() -> str | None:

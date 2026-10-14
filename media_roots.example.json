@@ -1,0 +1,25 @@
+{
+  "_comment": [
+    "Extra directories the MiniMax H3 Director media picker may browse, beyond",
+    "ComfyUI's input/ and output/ directories.",
+    "Copy this file to media_roots.json (same folder) and edit the paths.",
+    "Absolute paths; Windows paths need doubled backslashes in JSON.",
+    "The file is re-read whenever it changes: no ComfyUI restart needed.",
+    "Requests name a root by id, never by path, so clients cannot read arbitrary locations.",
+    "Roots whose 'path' does not exist are ignored (a log line is written)."
+  ],
+  "roots": [
+    {
+      "id": "assets",
+      "label": "素材盘",
+      "path": "S:\\Comfy-Desktop\\Assets"
+    },
+    {
+      "id": "refs",
+      "label": "参考图库",
+      "path": "S:\\Comfy-Desktop\\refs",
+      "exclude": ["tmp", "wip"]
+    }
+  ],
+  "exclude": ["minimax_seg_cache"]
+}

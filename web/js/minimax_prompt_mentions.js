@@ -1,4 +1,4 @@
-﻿/** Director prompt @-mentions + official-tag token chips (<Picture N> / <Video K> / <Audio J>).
+/** Director prompt @-mentions + official-tag token chips (<Picture N> / <Video K> / <Audio J>).
  *
  * Canonical storage is always the official MiniMax tag string (textarea.value).
  * The visible surface is a contenteditable that renders atomic bd-token chips.
@@ -125,15 +125,21 @@ function injectStyles() {
 }
 
 function inputViewUrl(filename, type = "input") {
-    const subfolder = filename.includes("/") ? filename.slice(0, filename.lastIndexOf("/")) : "";
-    const base = subfolder ? filename.slice(subfolder.length + 1) : filename;
-    const params = new URLSearchParams({ filename: base, type });
+    const rootId = String(type || "input");
+    const norm = String(filename || "").replace(/\\/g, "/");
+    if (rootId !== "input" && rootId !== "output" && rootId !== "temp") {
+        const params = new URLSearchParams({ id: rootId, rel: norm });
+        return api.apiURL(`/minimax/director/media_file?${params.toString()}`);
+    }
+    const subfolder = norm.includes("/") ? norm.slice(0, norm.lastIndexOf("/")) : "";
+    const base = subfolder ? norm.slice(subfolder.length + 1) : norm;
+    const params = new URLSearchParams({ filename: base, type: rootId });
     if (subfolder) params.set("subfolder", subfolder);
     return api.apiURL(`/view?${params.toString()}`);
 }
 
 function refThumbUrl(ref) {
-    if (ref?.imageFile) return inputViewUrl(ref.imageFile, "input");
+    if (ref?.imageFile) return inputViewUrl(ref.imageFile, ref.type || ref.root || "input");
     if (ref?.imageB64) {
         return ref.imageB64.startsWith("data:") ? ref.imageB64 : `data:image/png;base64,${ref.imageB64}`;
     }
@@ -142,7 +148,9 @@ function refThumbUrl(ref) {
 
 function videoThumbUrl(ref) {
     if (ref?.previewImageUrl) return String(ref.previewImageUrl);
-    if (ref?.previewImageFile) return inputViewUrl(ref.previewImageFile, "input");
+    if (ref?.previewImageFile) {
+        return inputViewUrl(ref.previewImageFile, ref.type || ref.root || "input");
+    }
     return "";
 }
 
